@@ -1,0 +1,109 @@
+/**
+  ******************************************************************************
+  * @file    lighting.c
+  * @brief   Реализация управления светодиодной балкой (выход L1 = DRV1).
+  *
+  *          Полярность моста DRV1 — как у катушек на ведомом узле:
+  *          CH1 (IN_A) — регулируемое плечо, сравнение PWM_PERIOD = закрыто,
+  *          0 = полный ток; CH2 (IN_B) — второе плечо, PWM_PERIOD = открыто,
+  *          0 = разрыв цепи (используется защитой от перетока).
+  ******************************************************************************
+  */
+
+#include "lighting.h"
+#include "config.h"
+#include "bsp.h"
+
+/* Стробоскоп: активность и отметка начала отсчёта фазы вспышек. */
+static uint8_t  strobe_active = 0;
+static uint32_t strobe_tick   = 0;
+
+/* Авария по току: балка погашена до возврата потенциометра в ноль. */
+static uint8_t  bar_fault = 0;
+
+uint32_t Lighting_CalcPeriod(uint8_t value)
+{
+  /* Умножение до деления: PWM_PERIOD не кратен 100, иначе при value = 0
+   * остаток давал бы паразитную засветку ~1 %.                              */
+  uint32_t percentage = 100 - value;
+  return (PWM_PERIOD * percentage) / 100;
+}
+
+/* Положение потенциометра -> яркость 0..100 %. */
+static uint8_t Lighting_PotToPercent(uint32_t adc)
+{
+  if (adc < POT_ADC_DEADBAND) {
+    return 0;
+  }
+  uint32_t percent = (adc * 100) / POT_ADC_MAX;
+  return (percent > 100) ? 100 : (uint8_t)percent;
+}
+
+/* -------------------------------------------------------------------------- */
+void Lighting_Init(void)
+{
+  /* Исходное состояние моста DRV1: плечо A закрыто (балка погашена),
+   * плечо B открыто — готово к регулировке током по CH1.                    */
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, PWM_PERIOD);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, PWM_PERIOD);
+
+  /* DRV2 не используется: оба плеча закрыты, EN остаются низкими.           */
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, PWM_PERIOD);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 0);
+
+  /* Разрешение драйвера DRV1. */
+  HAL_GPIO_WritePin(GPIOA, DRV1_EN_A_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOA, DRV1_EN_B_Pin, GPIO_PIN_SET);
+
+  strobe_tick = HAL_GetTick();
+}
+
+/* -------------------------------------------------------------------------- */
+void Lighting_Update(void)
+{
+  uint32_t now = HAL_GetTick();
+  uint32_t adc = ADS_RES_BUFFER[POT_ADC_IDX];
+
+  if (bar_fault) {
+    /* Сброс аварии — только возвратом ручки в ноль: оператор подтверждает,
+     * что заметил отключение, и балка не вспыхнет на полной яркости.        */
+    if (adc >= POT_ADC_DEADBAND) {
+      return;
+    }
+    bar_fault = 0;
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, PWM_PERIOD);
+  }
+
+  /* Вход/выход стробоскопа на краю диапазона — с гистерезисом. */
+  if (!strobe_active && adc >= STROBE_ON_ADC) {
+    strobe_active = 1;
+    strobe_tick   = now;
+  } else if (strobe_active && adc < STROBE_OFF_ADC) {
+    strobe_active = 0;
+  }
+
+  if (strobe_active) {
+    /* Вспышка STROBE_FLASH_MS в начале каждого периода STROBE_PERIOD_MS. */
+    uint32_t phase = (now - strobe_tick) % STROBE_PERIOD_MS;
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1,
+                          (phase < STROBE_FLASH_MS) ? 0 : PWM_PERIOD);
+  } else {
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1,
+                          Lighting_CalcPeriod(Lighting_PotToPercent(adc)));
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+void Lighting_CheckOvercurrent(void)
+{
+  uint32_t i_bar = ADS_RES_BUFFER[DRV1_CURRENT_IDX];
+
+  if (!bar_fault &&
+      (i_bar > BAR_OVERCURRENT_ADC_HI || i_bar < BAR_OVERCURRENT_ADC_LO)) {
+    /* Разомкнуть оба плеча DRV1: CH1 = PWM_PERIOD (A закрыто),
+     * CH2 = 0 (B закрыто) — цепь балки полностью разорвана.                 */
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, PWM_PERIOD);
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, 0);
+    bar_fault = 1;
+  }
+}
