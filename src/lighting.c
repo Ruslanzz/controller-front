@@ -177,14 +177,31 @@ void Lighting_Update(void)
 /* -------------------------------------------------------------------------- */
 void Lighting_CheckOvercurrent(void)
 {
+  /* Отметка начала непрерывного перетока; 0 — перетока нет. */
+  static uint32_t oc_since = 0;
+
   uint32_t i_bar = ADS_RES_BUFFER[DRV1_CURRENT_IDX];
 
-  if (!bar_fault &&
-      (i_bar > BAR_OVERCURRENT_ADC_HI || i_bar < BAR_OVERCURRENT_ADC_LO)) {
-    /* Разомкнуть оба плеча DRV1: CH1 = PWM_PERIOD (A закрыто),
-     * CH2 = 0 (B закрыто) — цепь балки полностью разорвана.                 */
+  if (bar_fault) {
+    return;
+  }
+
+  if (i_bar > BAR_OVERCURRENT_ADC_HI || i_bar < BAR_OVERCURRENT_ADC_LO) {
+    uint32_t now = HAL_GetTick();
+    if (oc_since == 0) {
+      oc_since = (now != 0) ? now : 1;
+      return;
+    }
+    if ((now - oc_since) < BAR_OVERCURRENT_TRIP_MS) {
+      return;  /* выдержка: возможно, одиночный выброс или пусковой ток */
+    }
+    /* Переток держится дольше выдержки — разомкнуть оба плеча DRV1:
+     * CH1 = PWM_PERIOD (A закрыто), CH2 = 0 (B закрыто).                    */
     __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, PWM_PERIOD);
     __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, 0);
     bar_fault = 1;
+    oc_since  = 0;
+  } else {
+    oc_since = 0;
   }
 }
