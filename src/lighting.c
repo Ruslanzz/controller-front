@@ -41,7 +41,16 @@ uint32_t Lighting_CalcPeriod(uint8_t value)
   return (PWM_PERIOD * percentage) / 100;
 }
 
-/* Положение потенциометра -> яркость 0..100 %. */
+/* Чтение потенциометра с реверсом шкалы: движок в крайнем положении
+ * (максимум яркости, стробоскоп) даёт минимум АЦП, поэтому значение
+ * инвертируется в прямую шкалу 0..POT_ADC_MAX.                              */
+static uint32_t Lighting_ReadPot(void)
+{
+  uint32_t adc = ADS_RES_BUFFER[POT_ADC_IDX];
+  return (adc >= POT_ADC_MAX) ? 0 : (POT_ADC_MAX - adc);
+}
+
+/* Положение потенциометра (прямая шкала) -> яркость 0..100 %. */
 static uint8_t Lighting_PotToPercent(uint32_t adc)
 {
   if (adc < POT_ADC_DEADBAND) {
@@ -54,6 +63,10 @@ static uint8_t Lighting_PotToPercent(uint32_t adc)
 /* -------------------------------------------------------------------------- */
 void Lighting_Init(void)
 {
+  /* Габаритные огни — горят постоянно с момента старта. */
+  IO_RelayOn(RELAY_MARKER_1);
+  IO_RelayOn(RELAY_MARKER_2);
+
   /* Исходное состояние моста DRV1: плечо A закрыто (балка погашена),
    * плечо B открыто — готово к регулировке током по CH1.                    */
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, PWM_PERIOD);
@@ -121,7 +134,7 @@ static void Lighting_UpdateTurns(uint32_t now)
 /* Балка: выбор режима (яркость / стробоскоп) и обновление ШИМ. */
 static void Lighting_UpdateBar(uint32_t now)
 {
-  uint32_t adc = ADS_RES_BUFFER[POT_ADC_IDX];
+  uint32_t adc = Lighting_ReadPot();
 
   if (bar_fault) {
     /* Сброс аварии — только возвратом ручки в ноль: оператор подтверждает,
