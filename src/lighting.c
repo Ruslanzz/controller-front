@@ -7,12 +7,16 @@
   *          CH1 (IN_A) — регулируемое плечо, сравнение PWM_PERIOD = закрыто,
   *          0 = полный ток; CH2 (IN_B) — второе плечо, PWM_PERIOD = открыто,
   *          0 = разрыв цепи (используется защитой от перетока).
+  *
+  *          Мигание указателей поворота: пока команда от ведущего активна,
+  *          реле переключается каждые TURN_BLINK_TOGGLE_MS (~1.5 Гц).
   ******************************************************************************
   */
 
 #include "lighting.h"
 #include "config.h"
 #include "bsp.h"
+#include "io.h"
 
 /* Стробоскоп: активность и отметка начала отсчёта фазы вспышек. */
 static uint8_t  strobe_active = 0;
@@ -20,6 +24,14 @@ static uint32_t strobe_tick   = 0;
 
 /* Авария по току: балка погашена до возврата потенциометра в ноль. */
 static uint8_t  bar_fault = 0;
+
+/* Указатели поворота: команды ведущего (пишутся из приёма CAN) и общая
+ * фаза мигания. Активен всегда максимум один указатель (оба рычага —
+ * стоп-сигнал, спереди оба гаснут), поэтому фаза общая.                     */
+static volatile uint8_t turn_left_active  = 0;
+static volatile uint8_t turn_right_active = 0;
+static uint8_t  blink_on   = 0;
+static uint32_t blink_tick = 0;
 
 uint32_t Lighting_CalcPeriod(uint8_t value)
 {
@@ -59,9 +71,56 @@ void Lighting_Init(void)
 }
 
 /* -------------------------------------------------------------------------- */
-void Lighting_Update(void)
+void Lighting_SetTurnLeft(uint8_t on)
 {
-  uint32_t now = HAL_GetTick();
+  if (on && !turn_left_active) {
+    /* Немедленное включение на фронте команды, фаза мигания с нуля. */
+    blink_on   = 1;
+    blink_tick = HAL_GetTick();
+    turn_left_active = 1;
+    IO_RelayOn(RELAY_TURN_LEFT);
+  } else if (!on && turn_left_active) {
+    turn_left_active = 0;
+    IO_RelayOff(RELAY_TURN_LEFT);
+  }
+}
+
+void Lighting_SetTurnRight(uint8_t on)
+{
+  if (on && !turn_right_active) {
+    blink_on   = 1;
+    blink_tick = HAL_GetTick();
+    turn_right_active = 1;
+    IO_RelayOn(RELAY_TURN_RIGHT);
+  } else if (!on && turn_right_active) {
+    turn_right_active = 0;
+    IO_RelayOff(RELAY_TURN_RIGHT);
+  }
+}
+
+/* Мигание активных указателей: переключение реле каждые TURN_BLINK_TOGGLE_MS. */
+static void Lighting_UpdateTurns(uint32_t now)
+{
+  if (!turn_left_active && !turn_right_active) {
+    return;
+  }
+
+  if ((now - blink_tick) >= TURN_BLINK_TOGGLE_MS) {
+    blink_tick = now;
+    blink_on   = !blink_on;
+
+    if (turn_left_active) {
+      if (blink_on) { IO_RelayOn(RELAY_TURN_LEFT); } else { IO_RelayOff(RELAY_TURN_LEFT); }
+    }
+    if (turn_right_active) {
+      if (blink_on) { IO_RelayOn(RELAY_TURN_RIGHT); } else { IO_RelayOff(RELAY_TURN_RIGHT); }
+    }
+  }
+}
+
+/* Балка: выбор режима (яркость / стробоскоп) и обновление ШИМ. */
+static void Lighting_UpdateBar(uint32_t now)
+{
   uint32_t adc = ADS_RES_BUFFER[POT_ADC_IDX];
 
   if (bar_fault) {
@@ -91,6 +150,15 @@ void Lighting_Update(void)
     __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1,
                           Lighting_CalcPeriod(Lighting_PotToPercent(adc)));
   }
+}
+
+/* -------------------------------------------------------------------------- */
+void Lighting_Update(void)
+{
+  uint32_t now = HAL_GetTick();
+
+  Lighting_UpdateTurns(now);
+  Lighting_UpdateBar(now);
 }
 
 /* -------------------------------------------------------------------------- */

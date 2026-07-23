@@ -57,7 +57,7 @@ int main(void)
   {
     CanBus_CheckTimeout();          /* потеря связи -> поворотники гаснут      */
     Lighting_CheckOvercurrent();    /* переток балки -> аварийное отключение   */
-    Lighting_Update();              /* яркость от потенциометра / стробоскоп   */
+    Lighting_Update();              /* мигание поворотников + балка/стробоскоп */
   }
 }
 

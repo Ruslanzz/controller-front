@@ -4,7 +4,7 @@
   * @brief   Обмен по шине CAN — узел передней светотехники.
   *
   *          Приём (FIFO0) кадров ведущего (device_id 0x01):
-  *            BASE_COMP — рычаги ведущего → реле указателей поворота.
+  *            BASE_COMP — рычаги ведущего → мигание указателей поворота.
   *          Расширенные (29-бит) кадры — трафик VESC, игнорируются.
   *
   *          Передача: периодический кадр BASE_COMP с состоянием собственных
@@ -16,6 +16,7 @@
 #include "config.h"
 #include "bsp.h"
 #include "io.h"
+#include "lighting.h"
 
 /* Заголовки и буферы передачи/приёма. */
 static CAN_TxHeaderTypeDef TxHeader_Std;
@@ -112,18 +113,19 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan_ptr)
   }
 
   /* Рычаги ведущего -> передние указатели поворота: comp[0] — левый,
-   * comp[1] — правый (та же семантика кадра, что у заднего узла). Оба нажаты
-   * — стоп-сигнал: его показывает задний узел, спереди поворотники гаснут.   */
+   * comp[1] — правый (та же семантика кадра, что у заднего узла). Пока рычаг
+   * активен, реле мигает автомат Lighting_UpdateTurns. Оба нажаты —
+   * стоп-сигнал: его показывает задний узел, спереди поворотники гаснут.     */
   if (parameter_index == BASE_COMP + COMP_COUNT) {
     uint8_t left_turn  = RxData[0];
     uint8_t right_turn = RxData[1];
 
     if (left_turn && right_turn) {
-      IO_RelayOff(RELAY_TURN_LEFT);
-      IO_RelayOff(RELAY_TURN_RIGHT);
+      Lighting_SetTurnLeft(0);
+      Lighting_SetTurnRight(0);
     } else {
-      if (left_turn)  { IO_RelayOn(RELAY_TURN_LEFT);  } else { IO_RelayOff(RELAY_TURN_LEFT);  }
-      if (right_turn) { IO_RelayOn(RELAY_TURN_RIGHT); } else { IO_RelayOff(RELAY_TURN_RIGHT); }
+      Lighting_SetTurnLeft(left_turn);
+      Lighting_SetTurnRight(right_turn);
     }
     can_last_control_tick = HAL_GetTick();
   }
@@ -135,7 +137,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan_ptr)
 void CanBus_CheckTimeout(void)
 {
   if ((HAL_GetTick() - can_last_control_tick) > CAN_CONTROL_TIMEOUT_MS) {
-    IO_RelayOff(RELAY_TURN_LEFT);
-    IO_RelayOff(RELAY_TURN_RIGHT);
+    Lighting_SetTurnLeft(0);
+    Lighting_SetTurnRight(0);
   }
 }
