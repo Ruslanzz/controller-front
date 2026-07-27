@@ -69,6 +69,20 @@ static uint8_t Lighting_PotToPercent(uint32_t adc)
   return (percent > 100) ? 100 : (uint8_t)percent;
 }
 
+/* Записать яркость габаритов в CH3. Регистр сравнения трогаем только при
+ * смене значения, чтобы не дёргать его в каждом проходе главного цикла.     */
+static uint32_t marker_compare = 0xFFFFFFFFu;  /* заведомо недостижимое */
+
+static void Lighting_SetMarkerPercent(uint8_t percent)
+{
+  uint32_t compare = Lighting_CalcPeriod(percent);
+
+  if (compare != marker_compare) {
+    marker_compare = compare;
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, compare);
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 void Lighting_Init(void)
 {
@@ -79,8 +93,7 @@ void Lighting_Init(void)
 
   /* Габариты: CH3 — верхний ключ DRV2, он и задаёт яркость. Нижний ключ
    * (CH4) держим закрытым: габариты возвращают ток на массу платы.          */
-  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3,
-                        Lighting_CalcPeriod(MARKER_BRIGHTNESS_PERCENT));
+  Lighting_SetMarkerPercent(MARKER_BRIGHTNESS_PERCENT);
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 0);
 
   /* Разрешение обоих плеч у обоих драйверов. */
@@ -139,6 +152,19 @@ static void Lighting_UpdateTurns(uint32_t now)
   }
 }
 
+/* Габариты: пока активен любой из указателей поворота, приглушаются до
+ * MARKER_DIM_PERCENT от штатной яркости, чтобы не забивать вспышки.         */
+static void Lighting_UpdateMarkers(void)
+{
+  uint8_t percent = MARKER_BRIGHTNESS_PERCENT;
+
+  if (turn_left_active || turn_right_active) {
+    percent = (uint8_t)((MARKER_BRIGHTNESS_PERCENT * MARKER_DIM_PERCENT) / 100);
+  }
+
+  Lighting_SetMarkerPercent(percent);
+}
+
 /* Балка: выбор режима (яркость / стробоскоп) и обновление ШИМ. */
 static void Lighting_UpdateBar(uint32_t now)
 {
@@ -178,6 +204,7 @@ void Lighting_Update(void)
   uint32_t now = HAL_GetTick();
 
   Lighting_UpdateTurns(now);
+  Lighting_UpdateMarkers();
   Lighting_UpdateBar(now);
 }
 
