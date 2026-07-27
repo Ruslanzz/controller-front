@@ -177,6 +177,37 @@ static void Lighting_UpdateBar(uint32_t now)
   }
 }
 
+#if DRV2_SELFTEST
+/* Перебор комбинаций каналов DRV2 — см. описание DRV2_SELFTEST в config.h.
+ * В каждой фазе один канал плавно идёт 0 -> PWM_PERIOD, второй зафиксирован. */
+static void Lighting_SelfTestDrv2(uint32_t now)
+{
+  #define SELFTEST_PHASE_MS 4000u
+
+  uint32_t phase = (now / SELFTEST_PHASE_MS) % 4u;
+  uint32_t sweep = ((now % SELFTEST_PHASE_MS) * PWM_PERIOD) / SELFTEST_PHASE_MS;
+
+  switch (phase) {
+    case 0:  /* качается CH3, CH4 = 0           */
+      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, sweep);
+      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 0);
+      break;
+    case 1:  /* качается CH3, CH4 = PWM_PERIOD  */
+      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, sweep);
+      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, PWM_PERIOD);
+      break;
+    case 2:  /* качается CH4, CH3 = 0           */
+      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, 0);
+      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, sweep);
+      break;
+    default: /* качается CH4, CH3 = PWM_PERIOD  */
+      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, PWM_PERIOD);
+      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, sweep);
+      break;
+  }
+}
+#endif
+
 /* -------------------------------------------------------------------------- */
 void Lighting_Update(void)
 {
@@ -184,6 +215,9 @@ void Lighting_Update(void)
 
   Lighting_UpdateTurns(now);
   Lighting_UpdateBar(now);
+#if DRV2_SELFTEST
+  Lighting_SelfTestDrv2(now);
+#endif
 }
 
 /* Выдержка перетока: 1, когда @p over держится дольше OVERCURRENT_TRIP_MS.
@@ -227,7 +261,9 @@ void Lighting_CheckOvercurrent(void)
   }
 
   /* --- Габариты (DRV2, плечо A) --- */
-  if (!marker_fault) {
+  /* На время самодиагностики защита не действует: она гасила бы канал
+   * посреди перебора и мешала определить рабочую комбинацию.                */
+  if (!DRV2_SELFTEST && !marker_fault) {
     uint32_t i = ADS_RES_BUFFER[DRV2_CURRENT_IDX];
     uint8_t  over = (i > MARKER_OVERCURRENT_ADC_HI || i < MARKER_OVERCURRENT_ADC_LO);
 
