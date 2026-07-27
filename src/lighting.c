@@ -10,9 +10,8 @@
   *          Балка включена между обоими плечами DRV1: CH1 (IN_A) —
   *          регулируемое плечо, CH2 (IN_B) — второе плечо моста.
   *
-  *          Габариты питаются одним плечом A драйвера DRV2 (CH3), возврат тока
-  *          — по общему минусу фонаря на массу платы; плечо B не используется
-  *          и остаётся запрещённым (см. config.h).
+  *          Габариты подключены к DRV2 и управляются так же: CH3 (IN_A) —
+  *          регулируемое плечо, CH4 (IN_B) — второе плечо, оба разрешены.
   *
   *          Мигание указателей поворота: пока команда от ведущего активна,
   *          реле переключается каждые TURN_BLINK_TOGGLE_MS (~1.5 Гц).
@@ -79,18 +78,19 @@ void Lighting_Init(void)
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, PWM_PERIOD);
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, PWM_PERIOD);
 
-  /* Габариты: плечо A драйвера DRV2 на заданной яркости, горят постоянно
-   * с момента старта. Плечо B не используется — его канал держим в нуле,
-   * а сам ключ запрещён (DRV2_EN_B остаётся низким после MX_GPIO_Init).     */
+  /* Габариты: DRV2 настроен так же, как DRV1 под балкой — CH3 регулируемое
+   * плечо, CH4 открытое. Второе плечо обязательно: именно оно притягивает
+   * выход к земле в паузах ШИМ. Без него узел в паузе повисает в воздухе,
+   * входная ёмкость светильника не разряжается, его внутренний драйвер
+   * работает непрерывно — и яркость от скважности не зависит.               */
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3,
                         Lighting_CalcPeriod(MARKER_BRIGHTNESS_PERCENT));
-  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 0);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, PWM_PERIOD);
 
-  /* Разрешение драйверов: DRV1 — оба плеча (балка включена в мост),
-   * DRV2 — только плечо A (габариты возвращают ток на массу платы).         */
+  /* Разрешение обоих плеч у обоих драйверов. */
   HAL_GPIO_WritePin(GPIOA, DRV1_EN_A_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOA, DRV1_EN_B_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(GPIOB, DRV2_EN_A_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOB, DRV2_EN_A_Pin|DRV2_EN_B_Pin, GPIO_PIN_SET);
 
   strobe_tick = HAL_GetTick();
 }
@@ -235,7 +235,8 @@ void Lighting_CheckOvercurrent(void)
 
     if (Lighting_TripDelayElapsed(&marker_oc_since, over)) {
       __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, PWM_PERIOD);
-      HAL_GPIO_WritePin(GPIOB, DRV2_EN_A_Pin, GPIO_PIN_RESET);
+      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, PWM_PERIOD);
+      HAL_GPIO_WritePin(GPIOB, DRV2_EN_A_Pin|DRV2_EN_B_Pin, GPIO_PIN_RESET);
       marker_fault    = 1;
       marker_oc_since = 0;
     }
