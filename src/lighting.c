@@ -11,7 +11,11 @@
   *
   *          Балка включена между обеими клеммами L1: CH1 — верхний ключ
   *          (регулировка), CH2 — нижний. Габариты — на верхнем ключе L2 (CH3),
-  *          возврат тока на массу платы; CH4 держит нижний ключ открытым.
+  *          возврат тока на массу платы, нижний ключ (CH4) закрыт.
+  *
+  *          Разрешение драйверов (DRV*_EN_*) выставляется один раз при старте
+  *          и больше не трогается: снятие разрешения не гасит выход, а
+  *          залипает его на V_BAT (см. предупреждение в config.h).
   *
   *          Мигание указателей поворота: пока команда от ведущего активна,
   *          реле переключается каждые TURN_BLINK_TOGGLE_MS (~1.5 Гц).
@@ -29,11 +33,6 @@ static uint32_t strobe_tick   = 0;
 
 /* Авария по току: балка погашена до возврата потенциометра в ноль. */
 static uint8_t  bar_fault = 0;
-
-/* Авария по току габаритов: снимается только перезапуском узла — органа
- * управления у габаритов нет, а самовосстановление в КЗ дало бы циклический
- * перезапуск нагрузки.                                                       */
-static uint8_t  marker_fault = 0;
 
 /* Указатели поворота: команды ведущего (пишутся из приёма CAN) и общая
  * фаза мигания. Активен всегда максимум один указатель (оба рычага —
@@ -78,12 +77,11 @@ void Lighting_Init(void)
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, PWM_PERIOD);
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, PWM_PERIOD);
 
-  /* Габариты: CH3 — верхний ключ DRV2 (он и задаёт яркость, плюс габаритов
-   * снимается с XP19), CH4 — нижний ключ. Нижний держим открытым, чтобы
-   * клемма XP10/XP20 была на земле, если светильник заведён туда минусом.   */
+  /* Габариты: CH3 — верхний ключ DRV2, он и задаёт яркость. Нижний ключ
+   * (CH4) держим закрытым: габариты возвращают ток на массу платы.          */
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3,
                         Lighting_CalcPeriod(MARKER_BRIGHTNESS_PERCENT));
-  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, PWM_PERIOD);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 0);
 
   /* Разрешение обоих плеч у обоих драйверов. */
   HAL_GPIO_WritePin(GPIOA, DRV1_EN_A_Pin, GPIO_PIN_SET);
@@ -153,9 +151,6 @@ static void Lighting_UpdateBar(uint32_t now)
       return;
     }
     bar_fault = 0;
-    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, PWM_PERIOD);
-    HAL_GPIO_WritePin(GPIOA, DRV1_EN_A_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(GPIOA, DRV1_EN_B_Pin, GPIO_PIN_SET);
   }
 
   /* Вход/выход стробоскопа на краю диапазона — с гистерезисом. */
@@ -177,37 +172,6 @@ static void Lighting_UpdateBar(uint32_t now)
   }
 }
 
-#if DRV2_SELFTEST
-/* Перебор комбинаций каналов DRV2 — см. описание DRV2_SELFTEST в config.h.
- * В каждой фазе один канал плавно идёт 0 -> PWM_PERIOD, второй зафиксирован. */
-static void Lighting_SelfTestDrv2(uint32_t now)
-{
-  #define SELFTEST_PHASE_MS 4000u
-
-  uint32_t phase = (now / SELFTEST_PHASE_MS) % 4u;
-  uint32_t sweep = ((now % SELFTEST_PHASE_MS) * PWM_PERIOD) / SELFTEST_PHASE_MS;
-
-  switch (phase) {
-    case 0:  /* качается CH3, CH4 = 0           */
-      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, sweep);
-      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 0);
-      break;
-    case 1:  /* качается CH3, CH4 = PWM_PERIOD  */
-      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, sweep);
-      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, PWM_PERIOD);
-      break;
-    case 2:  /* качается CH4, CH3 = 0           */
-      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, 0);
-      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, sweep);
-      break;
-    default: /* качается CH4, CH3 = PWM_PERIOD  */
-      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, PWM_PERIOD);
-      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, sweep);
-      break;
-  }
-}
-#endif
-
 /* -------------------------------------------------------------------------- */
 void Lighting_Update(void)
 {
@@ -215,9 +179,6 @@ void Lighting_Update(void)
 
   Lighting_UpdateTurns(now);
   Lighting_UpdateBar(now);
-#if DRV2_SELFTEST
-  Lighting_SelfTestDrv2(now);
-#endif
 }
 
 /* Выдержка перетока: 1, когда @p over держится дольше OVERCURRENT_TRIP_MS.
@@ -240,39 +201,21 @@ static uint8_t Lighting_TripDelayElapsed(uint32_t *since, uint8_t over)
 /* -------------------------------------------------------------------------- */
 void Lighting_CheckOvercurrent(void)
 {
-  static uint32_t bar_oc_since    = 0;
-  static uint32_t marker_oc_since = 0;
+  static uint32_t bar_oc_since = 0;
 
-  /* --- Балка (DRV1) --- */
-  if (!bar_fault) {
-    uint32_t i = ADS_RES_BUFFER[DRV1_CURRENT_IDX];
-    uint8_t  over = (i > BAR_OVERCURRENT_ADC_HI || i < BAR_OVERCURRENT_ADC_LO);
-
-    if (Lighting_TripDelayElapsed(&bar_oc_since, over)) {
-      /* Обесточить балку: оба плеча моста на землю — на нагрузке нулевая
-       * разность потенциалов, затем запретить сами ключи DRV1.              */
-      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, PWM_PERIOD);
-      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, PWM_PERIOD);
-      HAL_GPIO_WritePin(GPIOA, DRV1_EN_A_Pin, GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(GPIOA, DRV1_EN_B_Pin, GPIO_PIN_RESET);
-      bar_fault    = 1;
-      bar_oc_since = 0;
-    }
+  if (bar_fault) {
+    return;
   }
 
-  /* --- Габариты (DRV2, плечо A) --- */
-  /* На время самодиагностики защита не действует: она гасила бы канал
-   * посреди перебора и мешала определить рабочую комбинацию.                */
-  if (!DRV2_SELFTEST && !marker_fault) {
-    uint32_t i = ADS_RES_BUFFER[DRV2_CURRENT_IDX];
-    uint8_t  over = (i > MARKER_OVERCURRENT_ADC_HI || i < MARKER_OVERCURRENT_ADC_LO);
+  uint32_t i    = ADS_RES_BUFFER[DRV1_CURRENT_IDX];
+  uint8_t  over = (i > BAR_OVERCURRENT_ADC_HI || i < BAR_OVERCURRENT_ADC_LO);
 
-    if (Lighting_TripDelayElapsed(&marker_oc_since, over)) {
-      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, PWM_PERIOD);
-      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, PWM_PERIOD);
-      HAL_GPIO_WritePin(GPIOB, DRV2_EN_A_Pin|DRV2_EN_B_Pin, GPIO_PIN_RESET);
-      marker_fault    = 1;
-      marker_oc_since = 0;
-    }
+  if (Lighting_TripDelayElapsed(&bar_oc_since, over)) {
+    /* Закрыть верхний ключ балки. Разрешение драйвера при этом НЕ снимаем:
+     * без него затвор верхнего ключа притягивается вниз и выход залипает на
+     * V_BAT — защита включила бы балку вместо того, чтобы погасить.         */
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, PWM_PERIOD);
+    bar_fault    = 1;
+    bar_oc_since = 0;
   }
 }
