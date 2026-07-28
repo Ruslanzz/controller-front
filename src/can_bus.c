@@ -17,6 +17,7 @@
 #include "bsp.h"
 #include "io.h"
 #include "lighting.h"
+#include "bootloader.h"
 
 /* Заголовки и буферы передачи/приёма. */
 static CAN_TxHeaderTypeDef TxHeader_Std;
@@ -129,6 +130,18 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan_ptr)
     }
     can_last_control_tick = HAL_GetTick();
   }
+
+#ifdef USE_KATAPULT_BOOTLOADER
+  /* Команда ухода в загрузчик: адресована именно нам и несёт сигнатуру.
+   * Не возвращается — узел перезагружается в Katapult.                       */
+  else if (parameter_index == BASE_BOOT + BOOT_COUNT) {
+    if (RxData[0] == device_id      && RxData[1] == BOOT_CMD_SIG_0 &&
+        RxData[2] == BOOT_CMD_SIG_1 && RxData[3] == BOOT_CMD_SIG_2 &&
+        RxData[4] == BOOT_CMD_SIG_3) {
+      Bootloader_Request();
+    }
+  }
+#endif
 }
 
 /* --------------------------------------------------------------------------

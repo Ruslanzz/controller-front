@@ -11,7 +11,7 @@
   *  ADC_IN_1 (управление реверсное), в крайнем положении потенциометра
   *  включается стробоскоп. Периодически шлёт телеметрию дискретных входов.
   *
-  *  Модули: bsp, io, lighting, can_bus.
+  *  Модули: bsp, io, lighting, can_bus, bootloader.
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -22,12 +22,17 @@
 #include "io.h"
 #include "lighting.h"
 #include "can_bus.h"
+#include "bootloader.h"
 
 /**
   * @brief  The application entry point.
   */
 int main(void)
 {
+  /* Первым делом — таблица векторов на адрес приложения (сборка под
+   * загрузчик Katapult; в обычной сборке вызов пустой). */
+  Bootloader_RelocateVectors();
+
   BSP_Init();
 
   HAL_ADCEx_Calibration_Start(&hadc1);

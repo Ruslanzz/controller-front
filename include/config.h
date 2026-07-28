@@ -134,6 +134,7 @@ extern uint8_t device_id;            /* этот узел: 0x04                 
 #define BASE_COMP       0x40
 #define BASE_RELAY_OUT  0x50
 #define BASE_AKPP       0x60
+#define BASE_BOOT       0x70  /* команда ухода в загрузчик Katapult          */
 
 #define RELAY_COUNT     5
 #define ADC1_COUNT      2
@@ -142,6 +143,16 @@ extern uint8_t device_id;            /* этот узел: 0x04                 
 #define COMP_COUNT      1
 #define RELAY_OUT_COUNT 1
 #define AKPP_COUNT      1
+#define BOOT_COUNT      1
+
+/* ===== Команда ухода в CAN-загрузчик (только сборка katapult) ============= */
+/* Кадр 0x171 от ведущего: байт 0 — адрес узла, байты 1..4 — сигнатура.
+ * Сигнатура нужна, чтобы случайный кадр или помеха не перезагрузили узел на
+ * ходу: обновление гасит весь свет до выхода из режима прошивки.            */
+#define BOOT_CMD_SIG_0  0x4B  /* 'K' */
+#define BOOT_CMD_SIG_1  0x54  /* 'T' */
+#define BOOT_CMD_SIG_2  0xB0
+#define BOOT_CMD_SIG_3  0x07
 
 /* ===== Назначение реле переднего узла ====================================== */
 /* Индексы массива relay[] (см. io.c). Семантика — светотехника передней части.
