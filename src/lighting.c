@@ -208,41 +208,47 @@ void Lighting_Update(void)
   Lighting_UpdateBar(now);
 }
 
-/* Выдержка перетока: 1, когда @p over держится дольше OVERCURRENT_TRIP_MS.
- * Отметку начала перетока хранит вызывающая сторона — у каждого канала своя. */
-static uint8_t Lighting_TripDelayElapsed(uint32_t *since, uint8_t over)
-{
-  if (!over) {
-    *since = 0;
-    return 0;
-  }
-
-  uint32_t now = HAL_GetTick();
-  if (*since == 0) {
-    *since = (now != 0) ? now : 1;  /* 0 зарезервирован под "перетока нет" */
-    return 0;
-  }
-  return ((now - *since) >= OVERCURRENT_TRIP_MS) ? 1 : 0;
-}
-
 /* -------------------------------------------------------------------------- */
 void Lighting_CheckOvercurrent(void)
 {
-  static uint32_t bar_oc_since = 0;
+  static uint32_t window_start = 0;  /* начало текущего окна наблюдения    */
+  static uint32_t last_sample  = 0;  /* когда последний раз брали выборку  */
+  static uint8_t  hits         = 0;  /* превышений в текущем окне          */
 
   if (bar_fault) {
     return;
   }
 
-  uint32_t i    = ADS_RES_BUFFER[DRV1_CURRENT_IDX];
-  uint8_t  over = (i > BAR_OVERCURRENT_ADC_HI || i < BAR_OVERCURRENT_ADC_LO);
-
-  if (Lighting_TripDelayElapsed(&bar_oc_since, over)) {
-    /* Закрыть верхний ключ балки. Разрешение драйвера при этом НЕ снимаем:
-     * без него затвор верхнего ключа притягивается вниз и выход залипает на
-     * V_BAT — защита включила бы балку вместо того, чтобы погасить.         */
-    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, PWM_PERIOD);
-    bar_fault    = 1;
-    bar_oc_since = 0;
+  /* Опрос по времени: главный цикл крутится куда быстрее, чем АЦП обновляет
+   * канал (полный цикл сканирования 8 каналов ~224 мкс), и без ограничения
+   * одно и то же значение попало бы в счётчик десятки раз.                 */
+  uint32_t now = HAL_GetTick();
+  if ((now - last_sample) < OVERCURRENT_SAMPLE_MS) {
+    return;
   }
+  last_sample = now;
+
+  if ((now - window_start) >= OVERCURRENT_WINDOW_MS) {
+    window_start = now;
+    hits         = 0;
+  }
+
+  /* Ток рублен ШИМ верхнего плеча, поэтому считаем именно превышения, а не
+   * их непрерывную длительность: в паузах показание падает почти до нуля.
+   * Порог только верхний — ток в этой цепи однонаправленный, и низкое
+   * показание означает неисправный датчик, а не переток (см. config.h).   */
+  if (ADS_RES_BUFFER[DRV1_CURRENT_IDX] <= BAR_OVERCURRENT_ADC_HI) {
+    return;
+  }
+
+  if (++hits < OVERCURRENT_TRIP_HITS) {
+    return;
+  }
+
+  /* Закрыть верхний ключ балки. Разрешение драйвера при этом НЕ снимаем:
+   * без него затвор верхнего ключа притягивается вниз и выход залипает на
+   * V_BAT — защита включила бы балку вместо того, чтобы погасить.          */
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, PWM_PERIOD);
+  bar_fault = 1;
+  hits      = 0;
 }
