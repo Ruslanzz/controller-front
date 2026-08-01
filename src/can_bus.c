@@ -80,13 +80,57 @@ void CanBus_SendStd(uint32_t std_id, uint8_t *data, uint8_t length)
  * Периодическая отправка своего состояния (только кадр comp — у переднего
  * узла нет ни VESC, ни селектора, ни собственных команд управления).
  * -------------------------------------------------------------------------- */
+/* Телеметрия тока каналов DRV (BASE_DEBUG, по одному кадру за слот):
+ *   +1 — балка (L1):    ток мА, ноль АЦП, действующий порог мА, флаги, аварии;
+ *   +2 — габариты (L2): то же.
+ * Все слова — LE16. Байт флагов: бит 0 — ноль откалиброван, бит 1 — защита
+ * включена, бит 2 — показание упирается в потолок АЦП, бит 3 — канал отключён
+ * защитой. Порог 0 означает «защита отключена».
+ *
+ * Кадры нужны не для красоты: защита по току может честно отключить себя
+ * (неправдоподобный ноль датчика либо порог, не помещающийся под потолок
+ * измерения), и узнать об этом можно только отсюда — молча незащищённый канал
+ * выглядит точно так же, как защищённый. Заодно виден и ток габаритов: около
+ * нуля при горящих габаритах означает, что их обратный провод идёт мимо
+ * нижнего ключа и защита этого канала физически невозможна.                 */
+static void CanBus_SendDrvCurrentFrame(uint8_t index)
+{
+  DrvCurrentStatus st = {0};
+
+  Lighting_GetCurrentStatus(index, &st);
+
+  uint8_t flags = (uint8_t)((st.zero_valid ? 0x01 : 0) |
+                            (st.oc_enabled ? 0x02 : 0) |
+                            (st.saturated  ? 0x04 : 0) |
+                            (st.fault      ? 0x08 : 0));
+
+  uint8_t data[8] = {
+    (uint8_t)(st.ma_meas    & 0xFF), (uint8_t)(st.ma_meas    >> 8),
+    (uint8_t)(st.zero_adc   & 0xFF), (uint8_t)(st.zero_adc   >> 8),
+    (uint8_t)(st.oc_peak_ma & 0xFF), (uint8_t)(st.oc_peak_ma >> 8),
+    flags,
+    (uint8_t)((st.trips > 255) ? 255 : st.trips)
+  };
+
+  CanBus_SendStd(CanBus_GenerateStdId(device_id, BASE_DEBUG, (uint8_t)(index + 1)),
+                 data, 8);
+}
+
 void CanBus_TxTask(void)
 {
-  uint8_t data_comp[8];
-  for (uint8_t i = 0; i < 8; i++) {
-    data_comp[i] = IO_ReadPin(comp[i]);
+  static uint8_t phase = 0;
+
+  if (phase == 0) {
+    uint8_t data_comp[8];
+    for (uint8_t i = 0; i < 8; i++) {
+      data_comp[i] = IO_ReadPin(comp[i]);
+    }
+    CanBus_SendStd(CanBus_GenerateStdId(device_id, BASE_COMP, COMP_COUNT), data_comp, 8);
+  } else {
+    CanBus_SendDrvCurrentFrame((uint8_t)(phase - 1));
   }
-  CanBus_SendStd(CanBus_GenerateStdId(device_id, BASE_COMP, COMP_COUNT), data_comp, 8);
+
+  phase = (uint8_t)((phase + 1) % (1 + DRV_COUNT));
 }
 
 /* --------------------------------------------------------------------------
