@@ -21,6 +21,7 @@
 #include "config.h"
 #include "io.h"
 #include "lighting.h"
+#include "thermal.h"
 #include "can_bus.h"
 
 /**
@@ -71,6 +72,10 @@ int main(void)
    * него порог защиты. */
   Lighting_CalibrateCurrentSensors();
 
+  /* Тепловая защита платы по двум датчикам. Пороги отсюда — только начальные:
+   * действующие лежат в temp_trip_adc/temp_clear_adc и меняются на ходу. */
+  Thermal_Init();
+
   /* Общее реле питания. */
   IO_RelayOn(RELAY_POWER);
 
@@ -78,6 +83,7 @@ int main(void)
   {
     CanBus_CheckTimeout();          /* потеря связи -> поворотники гаснут      */
     Lighting_CheckOvercurrent();    /* переток -> аварийное отключение канала  */
+    Thermal_Update();               /* перегрев платы -> приглушение балки     */
     Lighting_Update();              /* мигание поворотников + балка/стробоскоп */
   }
 }

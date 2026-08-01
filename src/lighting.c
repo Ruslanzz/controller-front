@@ -26,6 +26,7 @@
 #include "config.h"
 #include "bsp.h"
 #include "io.h"
+#include "thermal.h"
 
 /* Стробоскоп: активность и отметка начала отсчёта фазы вспышек. */
 static uint8_t  strobe_active = 0;
@@ -318,13 +319,23 @@ static void Lighting_UpdateBar(uint32_t now)
   }
 
   if (strobe_active) {
-    /* Вспышка STROBE_FLASH_MS в начале каждого периода STROBE_PERIOD_MS. */
+    /* Вспышка STROBE_FLASH_MS в начале каждого периода STROBE_PERIOD_MS.
+     * Тепловое ограничение сюда не заводится намеренно: стробоскоп горит
+     * 30 мс из 100, то есть по средней мощности это уже 30 % яркости —
+     * ниже предела BAR_THERMAL_LIMIT_PCT (см. config.h).                    */
     uint32_t phase = (now - strobe_tick) % STROBE_PERIOD_MS;
     __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1,
                           (phase < STROBE_FLASH_MS) ? 0 : PWM_PERIOD);
   } else {
-    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1,
-                          Lighting_CalcPeriod(Lighting_PotToPercent(adc)));
+    uint8_t percent = Lighting_PotToPercent(adc);
+
+    /* Перегрев платы приглушает балку, но НЕ гасит: погасшая ночью балка
+     * опаснее горячей платы (та же логика, что и у защиты по току).        */
+    if (Thermal_Limit() && percent > BAR_THERMAL_LIMIT_PCT) {
+      percent = BAR_THERMAL_LIMIT_PCT;
+    }
+
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, Lighting_CalcPeriod(percent));
   }
 }
 
