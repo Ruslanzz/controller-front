@@ -17,6 +17,7 @@
 #include "bsp.h"
 #include "io.h"
 #include "lighting.h"
+#include "thermal.h"
 
 /* Заголовки и буферы передачи/приёма. */
 static CAN_TxHeaderTypeDef TxHeader_Std;
@@ -80,13 +81,99 @@ void CanBus_SendStd(uint32_t std_id, uint8_t *data, uint8_t length)
  * Периодическая отправка своего состояния (только кадр comp — у переднего
  * узла нет ни VESC, ни селектора, ни собственных команд управления).
  * -------------------------------------------------------------------------- */
+/* Телеметрия тока каналов DRV (BASE_DEBUG, по одному кадру за слот):
+ *   +1 — балка (L1):    ток мА, ноль АЦП, действующий порог мА, флаги, аварии;
+ *   +2 — габариты (L2): то же;
+ *   +3 — тепловая защита: температуры обоих датчиков и ДЕЙСТВУЮЩИЕ пороги.
+ * Все слова — LE16. Байт флагов: бит 0 — ноль откалиброван, бит 1 — защита
+ * включена, бит 2 — показание упирается в потолок АЦП, бит 3 — канал отключён
+ * защитой. Порог 0 означает «защита отключена».
+ *
+ * Кадры нужны не для красоты: защита по току может честно отключить себя
+ * (неправдоподобный ноль датчика либо порог, не помещающийся под потолок
+ * измерения), и узнать об этом можно только отсюда — молча незащищённый канал
+ * выглядит точно так же, как защищённый. Заодно виден и ток габаритов: около
+ * нуля при горящих габаритах означает, что их обратный провод идёт мимо
+ * нижнего ключа и защита этого канала физически невозможна.                 */
+static void CanBus_SendDrvCurrentFrame(uint8_t index)
+{
+  DrvCurrentStatus st = {0};
+
+  Lighting_GetCurrentStatus(index, &st);
+
+  uint8_t flags = (uint8_t)((st.zero_valid ? 0x01 : 0) |
+                            (st.oc_enabled ? 0x02 : 0) |
+                            (st.saturated  ? 0x04 : 0) |
+                            (st.fault      ? 0x08 : 0));
+
+  uint8_t data[8] = {
+    (uint8_t)(st.ma_meas    & 0xFF), (uint8_t)(st.ma_meas    >> 8),
+    (uint8_t)(st.zero_adc   & 0xFF), (uint8_t)(st.zero_adc   >> 8),
+    (uint8_t)(st.oc_peak_ma & 0xFF), (uint8_t)(st.oc_peak_ma >> 8),
+    flags,
+    (uint8_t)((st.trips > 255) ? 255 : st.trips)
+  };
+
+  CanBus_SendStd(CanBus_GenerateStdId(device_id, BASE_DEBUG, (uint8_t)(index + 1)),
+                 data, 8);
+}
+
+/* Тепловая защита: температуры обоих датчиков и ДЕЙСТВУЮЩИЕ пороги.
+ *
+ * Пороги передаются потому, что они переменные: их можно менять на ходу
+ * (Thermal_SetTripC), и без телеметрии нельзя было бы узнать, какой порог
+ * сейчас реально действует. Байты:
+ *   [0] температура датчика 1, °C (знаковая; -127 — датчик негоден);
+ *   [1] температура датчика 2, °C;
+ *   [2] порог срабатывания, °C;      [3] порог возврата, °C;
+ *   [4] флаги: бит 0/1 — датчик 1/2 годен, бит 2/3 — датчик 1/2 подтвердил
+ *       перегрев, бит 4 — балка приглушена по перегреву, бит 5 — оба датчика
+ *       негодны (защищать нечем);
+ *   [5] счётчик восстановлений испорченной пары порогов.
+ */
+static void CanBus_SendThermalFrame(void)
+{
+  ThermalStatus th = {0};
+
+  Thermal_GetStatus(&th);
+
+  uint8_t flags = (uint8_t)((th.valid[0]  ? 0x01 : 0) |
+                            (th.valid[1]  ? 0x02 : 0) |
+                            (th.over[0]   ? 0x04 : 0) |
+                            (th.over[1]   ? 0x08 : 0) |
+                            (th.limit     ? 0x10 : 0) |
+                            (th.no_sensor ? 0x20 : 0));
+
+  uint8_t data[6] = {
+    (uint8_t)(int8_t)th.temp_c[0],
+    (uint8_t)(int8_t)th.temp_c[1],
+    (uint8_t)(int8_t)th.trip_c,
+    (uint8_t)(int8_t)th.clear_c,
+    flags,
+    (uint8_t)((th.bad_writes > 255) ? 255 : th.bad_writes)
+  };
+
+  CanBus_SendStd(CanBus_GenerateStdId(device_id, BASE_DEBUG,
+                                      (uint8_t)(DRV_COUNT + 1)), data, 6);
+}
+
 void CanBus_TxTask(void)
 {
-  uint8_t data_comp[8];
-  for (uint8_t i = 0; i < 8; i++) {
-    data_comp[i] = IO_ReadPin(comp[i]);
+  static uint8_t phase = 0;
+
+  if (phase == 0) {
+    uint8_t data_comp[8];
+    for (uint8_t i = 0; i < 8; i++) {
+      data_comp[i] = IO_ReadPin(comp[i]);
+    }
+    CanBus_SendStd(CanBus_GenerateStdId(device_id, BASE_COMP, COMP_COUNT), data_comp, 8);
+  } else if (phase <= DRV_COUNT) {
+    CanBus_SendDrvCurrentFrame((uint8_t)(phase - 1));
+  } else {
+    CanBus_SendThermalFrame();
   }
-  CanBus_SendStd(CanBus_GenerateStdId(device_id, BASE_COMP, COMP_COUNT), data_comp, 8);
+
+  phase = (uint8_t)((phase + 1) % (2 + DRV_COUNT));
 }
 
 /* --------------------------------------------------------------------------
